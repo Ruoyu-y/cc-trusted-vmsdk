@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"os"
 	"syscall"
-	"unsafe"
 	"time"
+	"unsafe"
 
-	"github.com/mdlayher/vsock"
 	"github.com/cc-api/cc-trusted-api/common/golang/cctrusted_base/tdx"
+	"github.com/mdlayher/vsock"
 )
 
 type QuoteHandler interface {
@@ -94,18 +94,20 @@ func (q *QuoteHandler15) Quote(tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error)
 	var err error
 	var quote []byte
 
-	if len(q.tdxAttestConfig) != 0 && val, ok := q.tdxAttestConfig["port"]; ok{
-		quote, err = FetchQuoteByVsock(val, tdreport)
+	if len(q.tdxAttestConfig) != 0 {
+		if val, ok := q.tdxAttestConfig["port"]; ok {
+			quote, err = q.FetchQuoteByVsock(val, tdreport)
+		}
 	}
 
 	if err != nil {
-		quote, err = FetchQuoteByTdvmcall(tdreport)
+		quote, err = q.FetchQuoteByTdvmcall(tdreport)
 	}
 
 	return quote, err
 }
 
-func (q *QuoteHandler15)FetchQuoteByVsock(vsockPort int, tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error) {
+func (q *QuoteHandler15) FetchQuoteByVsock(vsockPort int, tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error) {
 	// fetch contextId for local vm socket
 	cid, err := vsock.ContextID()
 	if err != nil {
@@ -125,12 +127,12 @@ func (q *QuoteHandler15)FetchQuoteByVsock(vsockPort int, tdreport [tdx.TD_REPORT
 	}
 
 	// create tdx quote request
-	headerSize = 4
+	headerSize := 4
 	qsgMsgGetQuoteReq := tdx.NewQgsMsgGetQuoteReqVer15(tdreport)
 
-	msgSize = make([]byte, headerSize)
+	msgSize := make([]byte, headerSize)
 	binary.BigEndian.PutUint32(msgSize, qsgMsgGetQuoteReq.Header.Size)
-	pBlobPayload = make([]byte, msgSize+headerSize)
+	pBlobPayload := make([]byte, msgSize+headerSize)
 	copy(pBlobPayload[:headerSize], msgSize)
 	copy(pBlobPayload[headerSize:], qsgMsgGetQuoteReq[:qsgMsgGetQuoteReq.Header.Size])
 
@@ -145,7 +147,7 @@ func (q *QuoteHandler15)FetchQuoteByVsock(vsockPort int, tdreport [tdx.TD_REPORT
 		return nil, err
 	}
 	size := 0
-	for item := range(header[:nRead]){
+	for item := range header[:nRead] {
 		size = size*256 + uint32(item&0xFF)
 	}
 	qgsResp := make([]byte, size)
@@ -167,7 +169,7 @@ func (q *QuoteHandler15)FetchQuoteByVsock(vsockPort int, tdreport [tdx.TD_REPORT
 	return quote, nil
 }
 
-func (q *QuoteHandler15)FetchQuoteByTdvmcall(tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error) {
+func (q *QuoteHandler15) FetchQuoteByTdvmcall(tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error) {
 	var file *os.File
 
 	defer func() {
