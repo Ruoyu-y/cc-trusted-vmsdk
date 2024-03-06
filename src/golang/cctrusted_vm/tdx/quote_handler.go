@@ -9,7 +9,9 @@ import (
 	"os"
 	"syscall"
 	"unsafe"
+	"time"
 
+	"github.com/mdlayher/vsock"
 	"github.com/cc-api/cc-trusted-api/common/golang/cctrusted_base/tdx"
 )
 
@@ -25,6 +27,7 @@ var _ QuoteHandler = (*QuoteHandler15)(nil)
 
 type QuoteHandler15 struct {
 	devicePath          string
+	tdxAttestConfig     map[string]string
 	getTdReportOperator uintptr
 	getTdQuoteOperator  uintptr
 }
@@ -89,6 +92,82 @@ func (q *QuoteHandler15) TdReport(nonce, userData string) ([tdx.TD_REPORT_LEN]by
 // Quote implements QuoteHandler.
 func (q *QuoteHandler15) Quote(tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error) {
 	var err error
+	var quote []byte
+
+	if len(q.tdxAttestConfig) != 0 && val, ok := q.tdxAttestConfig["port"]; ok{
+		quote, err = FetchQuoteByVsock(val, tdreport)
+	}
+
+	if err != nil {
+		quote, err = FetchQuoteByTdvmcall(tdreport)
+	}
+
+	return quote, err
+}
+
+func (q *QuoteHandler15)FetchQuoteByVsock(vsockPort int, tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error) {
+	// fetch contextId for local vm socket
+	cid, err := vsock.ContextID()
+	if err != nil {
+		return nil, err
+	}
+
+	// connect to QGS socket
+	conn, err := vsock.Dial(cid, vsockPort)
+	if err != nil {
+		return nil, err
+	}
+
+	// set deadline for connection
+	err = vsock.SetDeadline(30 * time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	// create tdx quote request
+	headerSize = 4
+	qsgMsgGetQuoteReq := tdx.NewQgsMsgGetQuoteReqVer15(tdreport)
+
+	msgSize = make([]byte, headerSize)
+	binary.BigEndian.PutUint32(msgSize, qsgMsgGetQuoteReq.Header.Size)
+	pBlobPayload = make([]byte, msgSize+headerSize)
+	copy(pBlobPayload[:headerSize], msgSize)
+	copy(pBlobPayload[headerSize:], qsgMsgGetQuoteReq[:qsgMsgGetQuoteReq.Header.Size])
+
+	_, err = conn.Write(pBlobPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	header := make([]byte, headerSize)
+	nRead, err := conn.Read(header)
+	if err != nil {
+		return nil, err
+	}
+	size := 0
+	for item := range(header[:nRead]){
+		size = size*256 + uint32(item&0xFF)
+	}
+	qgsResp := make([]byte, size)
+	nRead, err = conn.Read(byte(size))
+	if err != nil {
+		return nil, err
+	}
+
+	if err = conn.Close(); err != nil {
+		return nil, err
+	}
+
+	raw_quote := tdx.NewQgsMsgGetQuoteRespFromBytes(qgsResp[:nRead]).IdQuote
+	quote, err := tdx.NewTdxQuote(raw_quote)
+	if err != nil {
+		return nil, err
+	}
+
+	return quote, nil
+}
+
+func (q *QuoteHandler15)FetchQuoteByTdvmcall(tdreport [tdx.TD_REPORT_LEN]byte) ([]byte, error) {
 	var file *os.File
 
 	defer func() {
@@ -138,8 +217,10 @@ func GetQuoteHandler(spec tdx.TDXDeviceSpec) (QuoteHandler, error) {
 		// TODO: support tdx 1.0
 		return nil, errors.New("tdx 1.0 version not supported now temporarily")
 	case tdx.TDX_VERSION_1_5:
+		attestConfig := spec.ProbeAttestConfig()
 		return &QuoteHandler15{
 			devicePath:          spec.DevicePath,
+			tdxAttestConfig:     attestConfig,
 			getTdReportOperator: spec.AllowedOperation[tdx.GetTdReport],
 			getTdQuoteOperator:  spec.AllowedOperation[tdx.GetQuote],
 		}, nil
