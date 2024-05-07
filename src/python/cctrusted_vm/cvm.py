@@ -31,6 +31,7 @@ class ConfidentialVM:
     _inst = None
     # Configfs-tsm directory prefix
     tsm_prefix = "/sys/kernel/config/tsm/report"
+    tsm_env = "TSM_REPORT"
 
     def __init__(self, cctype):
         self._cc_type:int = cctype
@@ -160,43 +161,69 @@ class ConfidentialVM:
 
         td_report = None
         provider = None
+        # Track generation values to guarantee report freshness
+        pre_generation = None
         generation = None
         aux_blob = None
-        # Create a temporary directory to request TEE attestation report
-        with tempfile.TemporaryDirectory(prefix="report_", dir=self.tsm_prefix) as tempdir:
+        # temporary directory for report fetching
+        tempdir = None
+        # flag to state pre-defined tsm report directory
+        dir_exist_flag = False
+
+        # Check the user defined directory for TEE attestation report fetching
+        if os.environ.get(self.tsm_env) is not None:
+            if os.path.exists(os.environ.get(self.tsm_env)):
+                tempdir = dir
+                dir_exist_flag = True
+                with open(os.path.join(tempdir, "generation"), 'r', encoding='utf-8') as gen_file:
+                    pre_generation = int(gen_file.read())
+        else:
+            LOG.error("Report directory defined in env not found. Creating tempdir...")
+            # Create a temporary directory to request TEE attestation report
+            dir = tempfile.TemporaryDirectory(prefix="report_", dir=self.tsm_prefix)
+            tempdir = dir.name
             LOG.info("Creating tempdir %s to request cc report", tempdir)
-            # Check if configfs-tsm interface has been generated
-            if not os.path.exists(os.path.join(tempdir, "inblob")):
-                LOG.debug("Inblob file not found under directory %s.", tempdir)
-                os.rmdir(tempdir)
+            # Setting the default generation value for new folder
+            pre_generation = 0
+
+        # Check if configfs-tsm interface has been generated
+        if not os.path.exists(os.path.join(tempdir, "inblob")):
+            LOG.debug("Inblob file not found under directory %s.", tempdir)
+            os.rmdir(tempdir)
+            return None
+
+        if privilege is not None and isinstance(privilege, int):
+            with open(os.path.join(tempdir, "privlevel"), 'w', encoding='utf-8') \
+                as privilege_file:
+                privilege_file.write(privilege)
+
+        # Insert input data
+        with open(os.path.join(tempdir, "inblob"), 'wb') as inblob_file:
+            inblob_file.write(input_data)
+
+        # Read generation info
+        with open(os.path.join(tempdir, "generation"), 'r', encoding='utf-8') \
+                as generation_file:
+            generation = int(generation_file.read())
+            if generation - pre_generation != 1:
+                LOG.error("Skip corrupted report. Suggest to fetch report again.")
+                if not dir_exist_flag:
+                    os.rmdir(tempdir)
                 return None
 
-            if privilege is not None and isinstance(privilege, int):
-                with open(os.path.join(tempdir, "privlevel"), 'w', encoding='utf-8') \
-                    as privilege_file:
-                    privilege_file.write(privilege)
+        # Read the output of report
+        with open(os.path.join(tempdir, "outblob"), 'rb') as outblob_file:
+            td_report = outblob_file.read()
 
-            # Insert input data
-            with open(os.path.join(tempdir, "inblob"), 'wb') as inblob_file:
-                inblob_file.write(input_data)
+        # Read provider info
+        with open(os.path.join(tempdir, "provider"), 'r', encoding='utf-8') as provider_file:
+            provider = provider_file.read()
 
-            # Read the output of report
-            with open(os.path.join(tempdir, "outblob"), 'rb') as outblob_file:
-                td_report = outblob_file.read()
+        if os.path.exists(os.path.join(tempdir, "auxblob")):
+            with open(os.path.join(tempdir, "auxblob"), 'rb') as auxblob_file:
+                aux_blob = auxblob_file.read()
 
-            # Read provider info
-            with open(os.path.join(tempdir, "provider"), 'r', encoding='utf-8') as provider_file:
-                provider = provider_file.read()
-
-            # Read generation info
-            with open(os.path.join(tempdir, "generation"), 'r', encoding='utf-8') \
-                as generation_file:
-                generation = generation_file.read()
-
-            if os.path.exists(os.path.join(tempdir, "auxblob")):
-                with open(os.path.join(tempdir, "auxblob"), 'rb') as auxblob_file:
-                    aux_blob = auxblob_file.read()
-
+        if not dir_exist_flag:
             os.rmdir(tempdir)
 
         if td_report is not None:

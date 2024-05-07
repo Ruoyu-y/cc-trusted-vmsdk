@@ -12,6 +12,7 @@ import (
 
 const (
 	TSM_PREFIX = "/sys/kernel/config/tsm/report"
+	TSM_ENV    = "TSM_REPORT"
 )
 
 type Device interface {
@@ -28,6 +29,9 @@ type GenericDevice struct {
 
 func (d *GenericDevice) Report(nonce, userData string, extraArgs map[string]any) (cctrusted_base.CcReport, error) {
 	var err error
+	var tempdir string
+	var dirExist bool
+
 	if _, err = os.Stat(TSM_PREFIX); os.IsNotExist(err) {
 		return cctrusted_base.CcReport{}, errors.New("Configfs TSM is not supported in the current environment.")
 	}
@@ -41,17 +45,42 @@ func (d *GenericDevice) Report(nonce, userData string, extraArgs map[string]any)
 	}
 	reportData := []byte(hasher.Sum(nil))
 
-	tempdir, err := os.MkdirTemp(TSM_PREFIX, "report_")
-	if err != nil {
-		return cctrusted_base.CcReport{}, errors.New("Failed to init entry in Configfs TSM.")
+	if os.Getenv(TSM_ENV) != "" {
+		if _, err = os.Stat(os.Getenv(TSM_ENV)); !os.IsNotExist(err) {
+			tempdir = os.Getenv(TSM_ENV)
+			dirExist = true
+		}
 	}
-	defer os.RemoveAll(tempdir)
+
+	if tempdir == "" {
+		tempdir, err = os.MkdirTemp(TSM_PREFIX, "report_")
+		if err != nil {
+			return cctrusted_base.CcReport{}, errors.New("Failed to init entry in Configfs TSM.")
+		}
+		dirExist = false
+	}
+
+	var outblob, provider, auxblob []byte
+	var preGeneration, generation int
+
+	// Check the original value of generation to guarantee report freshness
+	if _, err = os.Stat(filepath.Join(tempdir, "generation")); !os.IsNotExist(err) {
+		rawGeneration, err := os.ReadFile(filepath.Join(tempdir, "generation"))
+		if err != nil {
+			return cctrusted_base.CcReport{}, errors.New("Failed to get generation info.")
+		}
+		preGeneration, _ = strconv.Atoi(string(rawGeneration))
+	} else {
+		return cctrusted_base.CcReport{}, errors.New("Failed to get generation info.")
+	}
 
 	if _, err = os.Stat(filepath.Join(tempdir, "inblob")); !os.IsNotExist(err) {
 		err = os.WriteFile(filepath.Join(tempdir, "inblob"), reportData, 0400)
 		if err != nil {
 			return cctrusted_base.CcReport{}, errors.New("Failed to push report data into inblob.")
 		}
+	} else {
+		return cctrusted_base.CcReport{}, errors.New("Failed to get inblob info.")
 	}
 
 	if v, ok := extraArgs["privilege"]; ok {
@@ -63,13 +92,13 @@ func (d *GenericDevice) Report(nonce, userData string, extraArgs map[string]any)
 		}
 	}
 
-	var outblob, provider, auxblob []byte
-	var generation int
 	if _, err = os.Stat(filepath.Join(tempdir, "outblob")); !os.IsNotExist(err) {
 		outblob, err = os.ReadFile(filepath.Join(tempdir, "outblob"))
 		if err != nil {
 			return cctrusted_base.CcReport{}, errors.New("Failed to get outblob.")
 		}
+	} else {
+		return cctrusted_base.CcReport{}, errors.New("Failed to get outblob info.")
 	}
 
 	if _, err = os.Stat(filepath.Join(tempdir, "generation")); !os.IsNotExist(err) {
@@ -79,9 +108,11 @@ func (d *GenericDevice) Report(nonce, userData string, extraArgs map[string]any)
 		}
 		generation, _ = strconv.Atoi(string(rawGeneration))
 		// Check if the outblob has been corrupted during file open
-		if generation > 1 {
+		if generation-preGeneration != 1 {
 			return cctrusted_base.CcReport{}, errors.New("Found corrupted generation.")
 		}
+	} else {
+		return cctrusted_base.CcReport{}, errors.New("Failed to get generation info.")
 	}
 
 	if _, err = os.Stat(filepath.Join(tempdir, "provider")); !os.IsNotExist(err) {
@@ -89,6 +120,8 @@ func (d *GenericDevice) Report(nonce, userData string, extraArgs map[string]any)
 		if err != nil {
 			return cctrusted_base.CcReport{}, errors.New("Failed to get provider info.")
 		}
+	} else {
+		return cctrusted_base.CcReport{}, errors.New("Failed to get provider info.")
 	}
 
 	if _, err = os.Stat(filepath.Join(tempdir, "auxblob")); !os.IsNotExist(err) {
@@ -96,6 +129,10 @@ func (d *GenericDevice) Report(nonce, userData string, extraArgs map[string]any)
 		if err != nil {
 			return cctrusted_base.CcReport{}, errors.New("Failed to get auxblob info.")
 		}
+	}
+
+	if dirExist {
+		os.RemoveAll(tempdir)
 	}
 
 	return cctrusted_base.CcReport{
